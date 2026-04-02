@@ -11,6 +11,7 @@ from itertools import combinations
 import os
 from collections import Counter
 from Bio import SeqIO, SeqRecord,Seq
+from rmlst_stats import rmlst_stats
 
 """
 castanet_graph_hits_to_calls.py
@@ -141,20 +142,21 @@ def process_strict_unique_bact_groups(df):
     df['minimal_species_per_group'] = [[] for _ in range(len(df))]
     # Store unique count in a temporary dict for the collapse function
     group_unique_map = {}
+    group_dfindex_map = {}
 
     for g_idx, group in enumerate(final_valid_groups):
         g_label = f"BACT_G_{g_idx}"
         group_unique_map[g_label] = group['n_unique_loci']
+        group_dfindex_map[g_label] = group['indices']
         for row_idx in group['indices']:
             df.at[row_idx, 'assigned_groups'].append(g_label)
             df.at[row_idx, 'minimal_species_per_group'].append(group['common'])
 
-    return df, group_unique_map
+    return df, group_unique_map,group_dfindex_map
 
 
-def replace_with_collapsed_groups(df, group_unique_map, sum_cols):
-    # Be defensive: if 'assigned_groups' is missing, create an empty-list column
-    # so the rest of the logic can run safely. Also handle non-list values.
+def replace_with_collapsed_groups(df, group_unique_map, sum_cols,carryovercols,group_dfindex_map,rmlst_stats):
+
     if 'assigned_groups' not in df.columns:
         df = df.copy()
         df['assigned_groups'] = [[] for _ in range(len(df))]
@@ -166,15 +168,44 @@ def replace_with_collapsed_groups(df, group_unique_map, sum_cols):
 
     mask_used = df['assigned_groups'].apply(_has_assigned)
     exploded_df = df[mask_used].explode('assigned_groups')
-
+    exploded_df['locus'] = exploded_df["graph_name"].str.split("_").str[0].str.replace("bac","BACT")
     # Aggregation
     group_to_species = {}
     for idx, row in df[mask_used].iterrows():
         for i, g_id in enumerate(row['assigned_groups']):
             if g_id not in group_to_species:
                 group_to_species[g_id] = row['minimal_species_per_group'][i]
+    # for each assigned group check for any missing loci in rmlst_stats, if they are missing add a dummy row with 0 in all sum_cols except npos_max_probetype which should be rmlst_stats[locus]["median"]
+
+    rmlstorder = list(sorted(rmlst_stats.keys()))
+
+    for g_id, species in group_to_species.items():
+        explodedgroup = exploded_df.loc[exploded_df['assigned_groups'] == g_id]
+        includedloci = explodedgroup['locus'].apply(lambda x: x in rmlstorder)
+        for locus in rmlstorder:
+            if locus not in explodedgroup['locus'].values:
+                new_row = pd.Series({col: 0 for col in sum_cols})
+                new_row['assigned_groups'] = g_id
+                new_row['locus'] = locus
+                if "npos_max_probetype" in sum_cols:
+                    new_row["npos_max_probetype"] = rmlst_stats[locus]["median"]
+                exploded_df = pd.concat([exploded_df, new_row.to_frame().T], ignore_index=True)
+        ...
+    for g_id, species in group_to_species.items():
+        df_indices = group_dfindex_map[g_id]
+        for idx in df_indices:
+            row = df.loc[idx]
+            if row["graph_name"] in rmlst_stats:
+                locus = row["graph_name"]
+                for col in sum_cols:
+                    if col not in row or pd.isna(row[col]):
+                        if col == "npos_max_probetype":
+                            df.at[idx, col] = rmlst_stats[locus]["median"]
+                        else:
+                            df.at[idx, col] = 0
 
     agg_logic = {col: 'sum' for col in sum_cols if col in df.columns}
+    for x in carryovercols: agg_logic[x] = 'first'
     agg_logic['graph_name'] = 'count'
     # Include pathlen in sum_cols if it isn't already there for the prop calculation
     if 'pathlen' not in agg_logic: agg_logic['pathlen'] = 'sum'
@@ -185,17 +216,441 @@ def replace_with_collapsed_groups(df, group_unique_map, sum_cols):
     collapsed_df = collapsed_df.rename(columns={'assigned_groups': 'group_id', 'graph_name': 'n_loci'})
     collapsed_df['species_set'] = collapsed_df['group_id'].map(group_to_species)
     collapsed_df['n_unique_loci'] = collapsed_df['group_id'].map(group_unique_map)
-
+    collapsed_df["maindfindex"] = collapsed_df['group_id'].map(group_dfindex_map)
     for i in [1, 2, 5, 10, 100, 1000]:
         col_name = f"npos_cov_mindepth{i}"
         if col_name in collapsed_df.columns:
-            collapsed_df[f"prop_npos_cov{i}"] = collapsed_df[col_name] / collapsed_df["pathlen"]
+            collapsed_df[f"prop_npos_cov{i}"] = collapsed_df[col_name] / collapsed_df["npos_max_probetype"]
 
     # Combine
     df_remaining = df[~mask_used].copy()
     final_df = pd.concat([df_remaining, collapsed_df], ignore_index=True)
 
+
     return collapsed_df
+
+def merge_nodes(topgraphdata,depthfiles,consensusfiles,plotdir,consdir,sampleid,rmlst = False):
+    ...
+    for i in topgraphdata.iterrows():
+        graphname = i[1]["graph_name"]
+        speciesset = i[1]["species_set"]
+        speciessetls = speciesset.split(", ")
+        if len(speciessetls) > 3:
+            genera = list(set([x.split("~")[0] + f"-{speciesset.count(x.split("~")[0])}" for x in speciessetls]))
+            genera = ", ".join(genera)
+            ...
+        else:
+            genera = speciesset
+        outheader = f"{i[1]["graph_name"].replace("_graph", "")}_{genera}"
+        blocktuple = list(map(str, i[1]["block_id_order"]))
+        blockcounttuple = list(i[1]["blockcounts"])
+        blocklentuple = list(i[1]["block_len_tuple"])
+        if not graphname.startswith("bac000"):
+            blockstart = 0
+            pathoverall = None
+            consensusseq = ""
+            for blockindex, block in enumerate(blocktuple):
+                parsedblock = block.split("block")[-1].split("-")[0]
+                if parsedblock in depthfiles:
+                    blockdepths = pd.read_csv(depthfiles[parsedblock], header=None)
+                    blockdepths.index = ["all_reads", "dedup_reads"]
+                    blockdepths = blockdepths.transpose()
+                    blockdepths = blockdepths.iloc[:-1]
+                    blockdepths["all_reads_per_repitition"] = blockdepths["all_reads"] / blockcounttuple[blockindex]
+                    blockdepths["dedup_reads_per_repitition"] = blockdepths["dedup_reads"] / blockcounttuple[blockindex]
+                    blockdepths["position"] = blockdepths.index.astype(int)
+                    blockdepths["pathposition"] = blockdepths["position"] + blockstart
+                    blockstart = blockdepths["pathposition"].max() + 1
+                    blockdepths["blockmissing"] = False
+                    if pathoverall is None:
+                        pathoverall = blockdepths
+                    else:
+                        pathoverall = pd.concat([pathoverall, blockdepths], ignore_index=False)
+
+                else:
+                    blockdepths = pd.DataFrame(columns=["position", "all_reads", "all_reads_per_repitition", "dedup_reads",
+                                                        "dedup_reads_per_repitition", "pathposition", "blockmissing"])
+                    blockdepths["position"] = range(blocklentuple[blockindex])
+                    blockdepths["pathposition"] = blockdepths["position"] + blockstart
+                    blockstart = blockdepths["pathposition"].max() + 1
+                    blockdepths["all_reads"] = 0
+                    blockdepths["dedup_reads"] = 0
+                    blockdepths["dedup_reads_per_repitition"] = 0
+                    blockdepths["all_reads_per_repitition"] = 0
+                    blockdepths["blockmissing"] = True
+                    if pathoverall is None:
+                        pathoverall = blockdepths
+                    else:
+                        pathoverall = pd.concat([pathoverall, blockdepths], ignore_index=False)
+                if parsedblock in consensusfiles:
+                    inf = SeqIO.to_dict(SeqIO.parse(consensusfiles[parsedblock], "fasta"))
+                    key = list(inf.keys())[0]
+                    consensusseq += str(inf[key].seq)
+                else:
+                    consensusseq += "N" * blocklentuple[blockindex]
+
+            pathoverall["pathposition"] = pd.to_numeric(pathoverall["pathposition"], errors="coerce")
+            pathoverall["blockmissing"] = pathoverall["blockmissing"].astype(bool)
+
+            subset = pathoverall[pathoverall["position"] == 0]
+            x_values = subset["pathposition"].unique()
+            n_all = i[1].get("n_reads_all", None)
+            n_all_perrep = i[1].get("n_reads_all_per_repetition", None)
+            n_dedup_perrep = i[1].get("n_reads_dedup_per_repetition", None)
+            n_dedup = i[1].get("n_reads_dedup", None)
+            nc2 = i[1].get("npos_cov_mindepth2", None)
+            pn = i[1].get("prop_npos_cov2", None)
+            pn_str = f"{pn:.3f}" if (pn is not None and pd.notna(pn)) else str(pn)
+            stats_text = (
+                f"n_reads_all: {n_all}\n"
+                f"n_all_perrep: {n_all_perrep}\n"
+                f"n_reads_dedup: {n_dedup}\n"
+                f"n_dedup_perrep: {n_dedup_perrep}\n"
+                f"npos_cov_mindepth2: {nc2}\n"
+                f"prop_npos_cov2: {pn_str}"
+            )
+
+            if float(pn) > 0.35:
+
+                fig, ax = plt.subplots(figsize=(30, 6))
+                sns.lineplot(data=pathoverall, x="pathposition", y="dedup_reads", color="red", ax=ax)
+                sns.lineplot(data=pathoverall, x="pathposition", y="dedup_reads_per_repitition", color="red", ax=ax,
+                             alpha=0.3)
+                sns.lineplot(data=pathoverall, x="pathposition", y="all_reads", color="blue", ax=ax)
+                sns.lineplot(data=pathoverall, x="pathposition", y="all_reads_per_repitition", color="blue", ax=ax,
+                             alpha=0.3)
+
+                plt.title(f"{graphname}:{genera}")
+                for x in x_values:
+                    plt.axvline(x=x, linestyle="--")
+
+                # Make room on the right and place the text
+                fig.subplots_adjust(right=0.75)
+                ax.text(1.02, 0.95, stats_text, transform=ax.transAxes, ha="left", va="top",
+                        fontsize=10, family="monospace", bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"))
+                plt.yscale("log")
+
+                ymin, ymax = ax.get_ylim()
+
+                ax.fill_between(
+                    pathoverall["pathposition"],
+                    ymin,
+                    ymax,
+                    where=pathoverall["blockmissing"],
+                    alpha=0.7,
+                    color="grey"
+                )
+
+                ax.set_ylim(ymin, ymax)
+                sgraphname = re.sub(r'[^A-Za-z0-9._-]', '_', graphname).replace("_graph", "")
+                sspeciesset = re.sub(r'[^A-Za-z0-9._-]', '_', genera)
+                filename = f"{plotdir}/{sgraphname}-{sspeciesset}_log.png"
+
+                plt.savefig(filename, dpi=1000)
+                plt.close()
+
+                fig, ax = plt.subplots(figsize=(30, 6))
+                sns.lineplot(data=pathoverall, x="pathposition", y="dedup_reads", color="red", ax=ax)
+                sns.lineplot(data=pathoverall, x="pathposition", y="dedup_reads_per_repitition", color="red", ax=ax,
+                             alpha=0.3)
+                sns.lineplot(data=pathoverall, x="pathposition", y="all_reads", color="blue", ax=ax)
+                sns.lineplot(data=pathoverall, x="pathposition", y="all_reads_per_repitition", color="blue", ax=ax,
+                             alpha=0.3)
+
+                plt.title(f"{graphname}:{genera}")
+                for x in x_values:
+                    plt.axvline(x=x, linestyle="--")
+
+                # Make room on the right and place the text
+                fig.subplots_adjust(right=0.75)
+                ax.text(1.02, 0.95, stats_text, transform=ax.transAxes, ha="left", va="top",
+                        fontsize=10, family="monospace", bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"))
+                # plt.yscale("log")
+
+                ymin, ymax = ax.get_ylim()
+
+                ax.fill_between(
+                    pathoverall["pathposition"],
+                    ymin,
+                    ymax,
+                    where=pathoverall["blockmissing"],
+                    alpha=0.7,
+                    color="grey"
+                )
+
+                ax.set_ylim(ymin, ymax)
+                sgraphname = re.sub(r'[^A-Za-z0-9._-]', '_', graphname).replace("_graph", "")
+                sspeciesset = re.sub(r'[^A-Za-z0-9._-]', '_', genera)
+                filename = f"{plotdir}/{sgraphname}-{sspeciesset}.png"
+
+                plt.savefig(filename, dpi=1000)
+                plt.close()
+
+                nuccount = sum(consensusseq.count(b) for b in "ATGCatgc")
+                if nuccount > 0:
+                    graphspecs = re.sub(r'[^A-Za-z0-9._-]', '_', graphname).replace("_graph", "") + "_" + re.sub(
+                        r'[^A-Za-z0-9._-]', '_', genera)
+                    pathconsensus = SeqRecord.SeqRecord(Seq.Seq(consensusseq), id=f"{graphspecs}_{sampleid}_consensus",
+                                                        description="")
+                    SeqIO.write(pathconsensus, f"{consdir}/{graphspecs}_{sampleid}_consensus.fasta", "fasta")
+
+
+def plotrmlst(pathoverall,graphname,genera,x_values,locuspos,stats_text,plotdir,islog=False):
+    fig, ax = plt.subplots(figsize=(30, 6))
+    sns.lineplot(data=pathoverall, x="locusposition", y="dedup_reads", color="red", ax=ax)
+    sns.lineplot(data=pathoverall, x="locusposition", y="dedup_reads_per_repitition", color="red", ax=ax,
+                 alpha=0.3)
+    sns.lineplot(data=pathoverall, x="locusposition", y="all_reads", color="blue", ax=ax)
+    sns.lineplot(data=pathoverall, x="locusposition", y="all_reads_per_repitition", color="blue", ax=ax,
+                 alpha=0.3)
+
+    plt.title(f"{graphname}:{genera}")
+    for x in x_values:
+        plt.axvline(x=x, linestyle="--", alpha=0.2)
+    for x in locuspos:
+        plt.axvline(x=x, linestyle="--")
+    # Make room on the right and place the text
+    fig.subplots_adjust(right=0.75)
+    ax.text(1.02, 0.95, stats_text, transform=ax.transAxes, ha="left", va="top",
+            fontsize=10, family="monospace", bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"))
+    if islog:
+        plt.yscale("log")
+
+
+    ymin, ymax = ax.get_ylim()
+
+    ax.fill_between(
+        pathoverall["locusposition"],
+        ymin,
+        ymax,
+        where=pathoverall["blockmissing"],
+        alpha=0.7,
+        color="grey"
+    )
+
+    ax.set_ylim(ymin, ymax)
+    sgraphname = re.sub(r'[^A-Za-z0-9._-]', '_', graphname).replace("_graph", "")
+    sspeciesset = re.sub(r'[^A-Za-z0-9._-]', '_', genera)
+    if islog:
+        filename = f"{plotdir}/{sgraphname}-{sspeciesset}_log.png"
+    else:
+        filename = f"{plotdir}/{sgraphname}-{sspeciesset}.png"
+
+    plt.savefig(filename, dpi=1000)
+    plt.close()
+
+def merge_rmlst_nodes(rmlstgroups,rmlstgraphres,depthfiles,consensusfiles,outdir,sampleid):
+    ...
+    #Similar to merge_nodes but for each rmlst locus in a group generate a folder where each locus in that group has consensus and plots
+    # then generate a combined plot across all loci also generate a combined fasta file
+    rmlstdir = f"{outdir}/rmlst/"
+    plotdir = f"{rmlstdir}/plots/"
+    consdir = f"{rmlstdir}/consensus/"
+    if not os.path.isdir(rmlstdir):
+        os.makedirs(rmlstdir)
+        os.mkdir(consdir)
+        os.mkdir(plotdir)
+    else:
+        shutil.rmtree(rmlstdir)
+        os.makedirs(rmlstdir)
+        os.mkdir(consdir)
+        os.mkdir(plotdir)
+
+    for i in rmlstgroups.iterrows():
+        indices = i[1]["maindfindex"]
+
+        speciesset = i[1]["species_set"]
+        speciessetls = list(speciesset)
+        if len(speciessetls) > 3:
+            genera = list(set([x.split("~")[0] + f"-{speciesset.count(x.split("~")[0])}" for x in speciessetls]))
+            genera = "-".join(genera)
+            ...
+        else:
+            genera = speciesset
+            genera = "-".join(genera)
+        outheader = f"{i[1]["graph_name"].replace("_graph", "")}_{genera}"
+        # groupdir = f"{rmlstdir}/{outheader}"
+        # os.mkdir(groupdir)
+        # plotdir = f"{groupdir}/plots/"
+        # consdir = f"{groupdir}/consensus/"
+
+        rmlstorder = list(sorted(rmlst_stats.keys()))
+
+        locus_to_indices = {rmlstgraphres.iloc[index]["graph_name"].replace("bac","BACT").replace("_graph",""):index for index in indices}
+        indicesorder = [locus_to_indices[x] if x in locus_to_indices.keys() else None for x in rmlstorder ]
+        pathoverall = None
+        consensusseq = ""
+        locusstart = 0
+        consensusseqs = []
+        for locus in rmlstorder:
+            blockstart = 0
+            mediansize = rmlst_stats[locus]["median"]
+            if locus in locus_to_indices:
+                # print(locus,"graph")
+                index = locus_to_indices[locus]
+                grouplocus = rmlstgraphres.iloc[index]
+                graphname = grouplocus["graph_name"]
+                graphname = graphname.split("_")[0]
+                if grouplocus["isgraph"]:
+                # graphname = grouplocus["graph_name"]
+                    blocktuple = list(map(str, grouplocus["block_id_order"]))
+                    blockcounttuple = list(grouplocus["blockcounts"])
+                    blocklentuple = list(grouplocus["block_len_tuple"])
+                    # if not graphname.startswith("bac000"):
+
+                    for blockindex, block in enumerate(blocktuple):
+                        parsedblock = block.split("block")[-1].split("-")[0]
+                        if parsedblock in depthfiles:
+                            blockdepths = pd.read_csv(depthfiles[parsedblock], header=None)
+                            blockdepths.index = ["all_reads", "dedup_reads"]
+                            blockdepths = blockdepths.transpose()
+                            blockdepths = blockdepths.iloc[:-1]
+                            blockdepths["all_reads_per_repitition"] = blockdepths["all_reads"] / blockcounttuple[blockindex]
+                            blockdepths["dedup_reads_per_repitition"] = blockdepths["dedup_reads"] / blockcounttuple[blockindex]
+                            blockdepths["position"] = blockdepths.index.astype(int)
+                            blockdepths["locusposition"] = blockdepths["position"] + locusstart
+                            blockdepths["pathposition"] = blockdepths["position"] + blockstart
+                            blockstart = blockdepths["pathposition"].max() + 1
+                            locusstart = blockdepths["locusposition"].max() + 1
+                            blockdepths["blockmissing"] = False
+                            if pathoverall is None:
+                                pathoverall = blockdepths
+                            else:
+                                pathoverall = pd.concat([pathoverall, blockdepths], ignore_index=False)
+
+                        else:
+                            blockdepths = pd.DataFrame(
+                                columns=["position", "all_reads", "all_reads_per_repitition", "dedup_reads",
+                                         "dedup_reads_per_repitition", "pathposition", "blockmissing","locusposition"])
+                            blockdepths["position"] = range(blocklentuple[blockindex])
+                            blockdepths["pathposition"] = blockdepths["position"] + blockstart
+                            blockdepths["locusposition"] = blockdepths["position"] + locusstart
+                            blockstart = blockdepths["pathposition"].max() + 1
+                            locusstart = blockdepths["locusposition"].max() + 1
+                            blockdepths["all_reads"] = 0
+                            blockdepths["dedup_reads"] = 0
+                            blockdepths["dedup_reads_per_repitition"] = 0
+                            blockdepths["all_reads_per_repitition"] = 0
+                            blockdepths["blockmissing"] = True
+                            if pathoverall is None:
+                                pathoverall = blockdepths
+                            else:
+                                pathoverall = pd.concat([pathoverall, blockdepths], ignore_index=False)
+                        if parsedblock in consensusfiles:
+                            inf = SeqIO.to_dict(SeqIO.parse(consensusfiles[parsedblock], "fasta"))
+                            key = list(inf.keys())[0]
+                            consensusseq += str(inf[key].seq)
+                        else:
+                            consensusseq += "N" * blocklentuple[blockindex]
+                else:
+                    # print(locus, "nongraph")
+                    #TODO resolve below, need to use single node as full path
+                    blockid = grouplocus["block_idonly"]
+                    blockdepths = pd.read_csv(depthfiles[blockid], header=None)
+                    blockdepths.index = ["all_reads", "dedup_reads"]
+                    blockdepths = blockdepths.transpose()
+                    blockdepths = blockdepths.iloc[:-1]
+                    blockdepths["all_reads_per_repitition"] = blockdepths["all_reads"] / blockcounttuple[blockindex]
+                    blockdepths["dedup_reads_per_repitition"] = blockdepths["dedup_reads"] / blockcounttuple[blockindex]
+                    blockdepths["position"] = blockdepths.index.astype(int)
+                    blockdepths["locusposition"] = blockdepths["position"] + locusstart
+                    blockdepths["pathposition"] = blockdepths["position"] + blockstart
+                    blockstart = blockdepths["pathposition"].max() + 1
+                    locusstart = blockdepths["locusposition"].max() + 1
+                    blockdepths["blockmissing"] = False
+                    if pathoverall is None:
+                        pathoverall = blockdepths
+                    else:
+                        pathoverall = pd.concat([pathoverall, blockdepths], ignore_index=False)
+
+                    # blockdepths = pd.DataFrame(
+                    #     columns=["position", "all_reads", "all_reads_per_repitition", "dedup_reads",
+                    #              "dedup_reads_per_repitition", "pathposition", "blockmissing"])
+                    # blockdepths["position"] = range(mediansize)
+                    # blockdepths["pathposition"] = blockdepths["position"] + blockstart
+                    # blockdepths["locusposition"] = blockdepths["position"] + locusstart
+                    # blockstart = blockdepths["pathposition"].max() + 1
+                    # locusstart = blockdepths["locusposition"].max() + 1
+                    # blockdepths["all_reads"] = 0
+                    # blockdepths["dedup_reads"] = 0
+                    # blockdepths["dedup_reads_per_repitition"] = 0
+                    # blockdepths["all_reads_per_repitition"] = 0
+                    # blockdepths["blockmissing"] = True
+                    # if pathoverall is None:
+                    #     pathoverall = blockdepths
+                    # else:
+                    #     pathoverall = pd.concat([pathoverall, blockdepths], ignore_index=False)
+
+            else:
+                # print(locus,"missing")
+                blockdepths = pd.DataFrame(
+                    columns=["position", "all_reads", "all_reads_per_repitition", "dedup_reads",
+                             "dedup_reads_per_repitition", "pathposition", "blockmissing"])
+                blockdepths["position"] = range(mediansize)
+                blockdepths["pathposition"] = blockdepths["position"] + blockstart
+                blockdepths["locusposition"] = blockdepths["position"] + locusstart
+                blockstart = blockdepths["pathposition"].max() + 1
+                locusstart = blockdepths["locusposition"].max() + 1
+                blockdepths["all_reads"] = 0
+                blockdepths["dedup_reads"] = 0
+                blockdepths["dedup_reads_per_repitition"] = 0
+                blockdepths["all_reads_per_repitition"] = 0
+                blockdepths["blockmissing"] = True
+                if pathoverall is None:
+                    pathoverall = blockdepths
+                else:
+                    pathoverall = pd.concat([pathoverall, blockdepths], ignore_index=False)
+
+            nuccount = sum(consensusseq.count(b) for b in "ATGCatgc")
+            if nuccount > 0:
+                graphspecs = re.sub(r'[^A-Za-z0-9._-]', '_', graphname).replace("_graph", "") + "_" + re.sub(
+                    r'[^A-Za-z0-9._-]', '_', genera)
+                pathconsensus = SeqRecord.SeqRecord(Seq.Seq(consensusseq), id=f"{graphspecs}_{sampleid}_consensus",
+                                                    description="")
+                consensusseqs.append(pathconsensus)
+
+
+        pathoverall["pathposition"] = pd.to_numeric(pathoverall["pathposition"], errors="coerce")
+        pathoverall["pathposition"] = pd.to_numeric(pathoverall["pathposition"], errors="coerce")
+        pathoverall["blockmissing"] = pathoverall["blockmissing"].astype(bool)
+
+        subset = pathoverall[pathoverall["position"] == 0]
+        x_values = subset["pathposition"].unique()
+        locussubset = pathoverall[pathoverall["pathposition"] == 0]
+        locuspos = locussubset["locusposition"].unique()
+
+        groupid = i[1]["group_id"]
+        grouplocus = rmlstgroups.loc[rmlstgroups["group_id"] == groupid]
+        n_all = grouplocus["n_reads_all"].tolist()[0]
+        # n_all_perrep = grouplocus.get("n_reads_all_per_repetition", None)
+        # n_dedup_perrep = grouplocus.get("n_reads_dedup_per_repetition", None)
+        n_dedup = grouplocus["n_reads_dedup"].tolist()[0]
+        nc2 = grouplocus["npos_cov_mindepth2"].tolist()[0]
+        pn = grouplocus["prop_npos_cov2"].tolist()[0]
+
+        pn_str = f"{pn:.3f}" if (pn is not None and pd.notna(pn)) else str(pn)
+        stats_text = (
+            f"n_reads_all: {n_all:0.0f}\n"
+            f"n_reads_dedup: {n_dedup:0.0f}\n"
+            f"npos_cov_mindepth2: {nc2:0.0f}\n"
+            f"prop_npos_cov2: {pn_str}"
+        )
+        ...
+        if float(pn) > 0.35:
+
+            plotrmlst(pathoverall,"rMLST", genera, x_values, locuspos, stats_text, plotdir)
+            plotrmlst(pathoverall, "rMLST", genera, x_values, locuspos, stats_text, plotdir,islog=True)
+
+
+
+            #TODO rather than doing plots for each locus, generate one plots across all rMLST loci
+            #TODO also generate one consensus fasta for the sample/rmlst group
+            ...
+        SeqIO.write(consensusseqs, f"{consdir}/{sampleid}_{outheader}_consensus.fasta", "fasta")
+    ...
+
+
+
 
 def main():
     """
@@ -217,6 +672,12 @@ def main():
     graphdata["block_id_order"] = graphdata.apply(update_to_longblockordernames,axis=1)
     graphdata["graph_name"] = graphdata["graph_name"].str.replace("BACT000","bac000").replace("16S","16s").replace("23S","23s")
     graphdata["blockcounts"] = graphdata["block_id_order"].apply(lambda lst: [Counter(lst)[x] for x in lst])
+    species_dict = {
+        s.replace("~", "").lower(): s
+        for sublist in graphdata["species_set"]
+        for s in sublist
+    }
+
     samplecastanet = pd.read_csv(args.inputcastanet)
 
     if "n_reads_all" not in samplecastanet.columns:
@@ -254,16 +715,20 @@ def main():
        'npos_cov_probetype','npos_cov_mindepth1', 'npos_cov_mindepth2', 'npos_cov_mindepth5',
        'npos_cov_mindepth10', 'npos_cov_mindepth100', 'npos_cov_mindepth1000','npos_dedup_cov_mindepth1', 'npos_dedup_cov_mindepth2',
        'npos_dedup_cov_mindepth5', 'npos_dedup_cov_mindepth10',
-       'npos_dedup_cov_mindepth100', 'npos_dedup_cov_mindepth1000','reads_on_target', 'reads_on_target_dedup',]
+       'npos_dedup_cov_mindepth100', 'npos_dedup_cov_mindepth1000']
     sumcolswiththresh = ["npos_cov_mindepth2", "n_reads_dedup","n_reads_all",'npos_max_probetype',
        'npos_cov_probetype','npos_cov_mindepth1', 'npos_cov_mindepth2', 'npos_cov_mindepth5',
        'npos_cov_mindepth10', 'npos_cov_mindepth100', 'npos_cov_mindepth1000','npos_dedup_cov_mindepth1', 'npos_dedup_cov_mindepth2',
        'npos_dedup_cov_mindepth5', 'npos_dedup_cov_mindepth10',
        'npos_dedup_cov_mindepth100', 'npos_dedup_cov_mindepth1000']
     divbycoount = ["n_reads_dedup","n_reads_all"]
+    carryovercols = ['reads_on_target', 'reads_on_target_dedup',]
 
-
-
+    for col in carryovercols:
+        if col not in samplecastanet.columns:
+            raise ValueError(f"Input castanet file is missing required column: {col}")
+        colmap = samplecastanet.set_index("block_id")[col].to_dict()
+        graphdata[col] = graphdata["block_id_order"].str[0]
     for col in sumcols:
         if col not in samplecastanet.columns:
             raise ValueError(f"Input castanet file is missing required column: {col}")
@@ -303,14 +768,14 @@ def main():
         lambda s: statistics.mean([colmap.get(bid, 0) for bid in s])
         )
 
-    usethresh = True
+    usethresh = False
     # Compute the proportion of positions covered at depth>=2 relative to path length
     if usethresh:
         for i in [1,2,5,10,100,1000]:
-            graphdata[f"prop_npos_cov{i}"] = graphdata[f"npos_cov_mindepth{i}_thresh"] / graphdata["pathlen"]
+            graphdata[f"prop_npos_cov{i}"] = graphdata[f"npos_cov_mindepth{i}_thresh"] / graphdata["npos_max_probetype"]
     else:
         for i in [1, 2, 5, 10, 100, 1000]:
-            graphdata[f"prop_npos_cov{i}"] = graphdata[f"npos_cov_mindepth{i}"] / graphdata["pathlen"]
+            graphdata[f"prop_npos_cov{i}"] = graphdata[f"npos_cov_mindepth{i}"] / graphdata["npos_max_probetype"]
 
     # Filter out paths with no dedup reads and low coverage proportion
     graphdata = graphdata[graphdata["n_reads_dedup"] > 0]
@@ -354,6 +819,8 @@ def main():
         drop=True)
     nonrmlstfinal = finalgraphdata[~finalgraphdata['graph_name'].str.startswith('bac000', na=False)]
     # Restore grouping by component and graph_name to select the top (highest-ranked) path
+    #TODO forS87 in 16S wrong path being selected.
+    check = finalgraphdata.groupby(["component", "graph_name"], sort=False).count().reset_index()
     topgraphdata = finalgraphdata.groupby(["component", "graph_name"], sort=False).first().reset_index()
 
     #process rMLST data
@@ -361,15 +828,34 @@ def main():
     mask = topgraphdata['graph_name'].str.startswith('bac000', na=False)
     rmlstdata = topgraphdata[mask].copy()
 
-    rmlstdata,group_metadata = process_strict_unique_bact_groups(rmlstdata)
+    nongraph_rmlstdata = non_graph_hits[non_graph_hits["graph_id"].str.startswith('graphbac000', na=False)].copy()
+    # nongraph_rmlstdata["graph_name"] = nongraph_rmlstdata["graph_id"].str.replace("graph", "")
+    nongraph_rmlstdata[["graph_name", "species_set"]] = nongraph_rmlstdata["probetype"].str.extract(r"block(bac\d+)(.+)$")
+    nongraph_rmlstdata["species_set"] = nongraph_rmlstdata["species_set"].map(lambda x: [species_dict[x]] if x in species_dict else [x])
+    # nongraph_rmlstdata["species_set"] = nongraph_rmlstdata["species_set"].map(lambda x: [x])
+    nongraph_rmlstdata["isgraph"] = False
+    rmlstdata["isgraph"] = True
+    merged_rmlst = pd.concat([rmlstdata, nongraph_rmlstdata], ignore_index=True).reset_index()
+    rmlstdata,group_metadata,group_dfindex_map = process_strict_unique_bact_groups(merged_rmlst)
+
     if group_metadata != {}:
         rmlstsumcols = ["pathlen","npos_cov_mindepth2", "n_reads_dedup","n_reads_all",'npos_max_probetype',
            'npos_cov_probetype','npos_cov_mindepth1', 'npos_cov_mindepth2', 'npos_cov_mindepth5',
            'npos_cov_mindepth10', 'npos_cov_mindepth100', 'npos_cov_mindepth1000','npos_dedup_cov_mindepth1', 'npos_dedup_cov_mindepth2',
            'npos_dedup_cov_mindepth5', 'npos_dedup_cov_mindepth10',
-           'npos_dedup_cov_mindepth100', 'npos_dedup_cov_mindepth1000','reads_on_target', 'reads_on_target_dedup',]
-        rmlstdata = replace_with_collapsed_groups(rmlstdata,group_metadata,rmlstsumcols)
-        rmlstdata.to_csv(f"{args.output}_rMLST_combined.tsv",sep="\t", index=False)
+           'npos_dedup_cov_mindepth100', 'npos_dedup_cov_mindepth1000',]
+        carryovercols = ['block_id_order',"block_len_tuple",""'reads_on_target', 'reads_on_target_dedup',]
+        rmlstdata = replace_with_collapsed_groups(merged_rmlst,group_metadata,rmlstsumcols,carryovercols,group_dfindex_map,rmlst_stats)
+        rmlstdata["graph_name"] = "rmlst_"+rmlstdata["group_id"].str.replace("BACT_","")
+        #group_id species_set n_loci n_unique_loci pathlen	npos_cov_mindepth2	n_reads_dedup	n_reads_all	npos_max_probetype	npos_cov_probetype	npos_cov_mindepth1	npos_cov_mindepth5	npos_cov_mindepth10	npos_cov_mindepth100	npos_cov_mindepth1000	npos_dedup_cov_mindepth1	npos_dedup_cov_mindepth2	npos_dedup_cov_mindepth5	npos_dedup_cov_mindepth10	npos_dedup_cov_mindepth100	npos_dedup_cov_mindepth1000 prop_npos_cov1	prop_npos_cov2	prop_npos_cov5	prop_npos_cov10	prop_npos_cov100	prop_npos_cov1000
+        colforfinal = ['group_id','species_set','n_loci','n_unique_loci','pathlen','npos_cov_mindepth2','n_reads_dedup','n_reads_all','npos_max_probetype','npos_cov_probetype','npos_cov_mindepth1','npos_cov_mindepth5','npos_cov_mindepth10','npos_cov_mindepth100','npos_cov_mindepth1000','npos_dedup_cov_mindepth1','npos_dedup_cov_mindepth2','npos_dedup_cov_mindepth5','npos_dedup_cov_mindepth10','npos_dedup_cov_mindepth100','npos_dedup_cov_mindepth1000', 'prop_npos_cov1', 'prop_npos_cov2', 'prop_npos_cov5', 'prop_npos_cov10', 'prop_npos_cov100', 'prop_npos_cov1000']
+        rmlstdatafinal = rmlstdata[colforfinal]
+        rmlstdatafinal["species_set"] = rmlstdatafinal["species_set"].apply(lambda x: ", ".join(x))
+        rmlstdatafinal.to_csv(f"{args.output}_rMLST_combined.tsv",sep="\t", index=False)
+        rmlstdata.to_csv(f"{args.output}_rMLST_debug.tsv", sep="\t", index=False)
+
+
+
 
     # topgraphdata = topgraphdata[~mask]
 
@@ -390,7 +876,7 @@ def main():
 
     df_merged = topgraphdata.combine_first(non_graph_hits)
     """amprate_mean	amprate_median	amprate_std	block_id_set	clean_n_reads_all	clean_prop_of_reads_on_target	component	depth_25pc	depth_75pc	depth_mean	depth_median	depth_std	graph_name	log10_depthmean	log10_udepthmean	n_genes	n_reads_all	n_reads_dedup	n_targets	nmax_genes	nmax_targets	npos_cov_mindepth1	npos_cov_mindepth10	npos_cov_mindepth100	npos_cov_mindepth1000	npos_cov_mindepth2	npos_cov_mindepth5	npos_cov_probetype	npos_dedup_cov_mindepth1	npos_dedup_cov_mindepth10	npos_dedup_cov_mindepth100	npos_dedup_cov_mindepth1000	npos_dedup_cov_mindepth2	npos_dedup_cov_mindepth5	npos_max_probetype	path_ids	pathlen	pathnames	probetype	prop_ngenes	prop_npos_cov1	prop_npos_cov10	prop_npos_cov100	prop_npos_cov1000	prop_npos_cov2	prop_npos_cov5	prop_ntargets	prop_of_reads_on_target	pt	rawreadnum	readprop	reads_on_target	reads_on_target_dedup	sampleid	species_set	udepth_25pc	udepth_75pc	udepth_mean	udepth_median	udepth_std"""
-    cols = ['graph_name', 'sampleid','component','pathlen','n_reads_dedup','n_reads_dedup_per_repetition','block_id_set','block_id_order','species_set',
+    cols = ['graph_name', 'sampleid','component','pathlen','n_reads_dedup','n_reads_dedup_per_repetition','block_id_set','block_id_order','blockcounts','species_set',
     'probetype', 'npos_cov_mindepth1','npos_cov_mindepth2','npos_cov_mindepth5', 'npos_cov_mindepth10', 'npos_cov_mindepth100', 'npos_cov_mindepth1000',
     'npos_cov_probetype', 'npos_dedup_cov_mindepth1', 'npos_dedup_cov_mindepth2', 'npos_dedup_cov_mindepth5', 'npos_dedup_cov_mindepth10', 'npos_dedup_cov_mindepth100',
     'npos_dedup_cov_mindepth1000', 'npos_max_probetype',
@@ -405,8 +891,6 @@ def main():
     df_merged = df_merged[cols]
     df_merged["sampleid"] = df_merged["sampleid"].fillna(samplecastanet["sampleid"].iloc[0])
     df_merged.to_csv(f"{args.output}_all_targets_w_top_paths.tsv", sep="\t", index=False)
-
-    #TODO add non graph bact entries to graph based process - single species rows
     plotdir = f"{args.output}_depthplots"
     consdir = f"{args.output}_consensus"
     if not os.path.exists(plotdir):
@@ -425,6 +909,14 @@ def main():
         consensusfiles = {block.split("block")[-1].split("-")[0]: consensusfiles[block] for block in consensusfiles}
 
     if os.path.exists(args.inputdepthfolder):
+        depthfiles = glob.glob(f"{args.inputdepthfolder}/*depth_by_pos.csv")
+        depthfiles = {f.split("/")[-1].split("-")[0]:f for f in depthfiles}
+        depthfiles = {block.split("block")[-1].split("-")[0]:depthfiles[block] for block in depthfiles}
+
+        if group_metadata != {}:
+            merge_rmlst_nodes(rmlstdata,merged_rmlst, depthfiles, consensusfiles, args.output, sampleid)
+
+
         for i in non_graph_hits.iterrows():
             if i[1].get("prop_npos_cov2", 0) > 0.1:
                 # print(i[1].get("block_id", 0))
@@ -446,7 +938,7 @@ def main():
                             f"prop_npos_cov2: {pn_str}"
                         )
 
-                        if float(pn) > 0.7:
+                        if float(pn) > 0.35:
                             blockdepths = pd.read_csv(f"{args.inputdepthfolder}/{graphname}-{sampleid}_depth_by_pos.csv", header=None)
                             blockdepths.index = ["all_reads", "dedup_reads"]
                             blockdepths = blockdepths.transpose()
@@ -477,171 +969,8 @@ def main():
                                 SeqIO.write(pathconsensus, f"{consdir}/{outheader}_consensus.fasta", "fasta")
                         #,f"{consdir}/{graphname}_consensus.fasta")
 
+        merge_nodes(topgraphdata, depthfiles, consensusfiles, plotdir, consdir, sampleid)
 
-        depthfiles = glob.glob(f"{args.inputdepthfolder}/*depth_by_pos.csv")
-        depthfiles = {f.split("/")[-1].split("-")[0]:f for f in depthfiles}
-        depthfiles = {block.split("block")[-1].split("-")[0]:depthfiles[block] for block in depthfiles}
-
-        for i in topgraphdata.iterrows():
-            graphname = i[1]["graph_name"]
-            speciesset = i[1]["species_set"]
-            speciessetls = speciesset.split(", ")
-            if len(speciessetls) > 3:
-                genera = list(set([x.split("~")[0] + f"-{speciesset.count(x.split("~")[0])}" for x in speciessetls]))
-                genera = ", ".join(genera)
-                ...
-            else:
-                genera = speciesset
-            outheader = f"{i[1]["graph_name"].replace("_graph","")}_{genera}"
-            blocktuple = list(map(str,i[1]["block_id_order"]))
-            blockcounttuple = list(i[1]["blockcounts"])
-            blocklentuple = list(i[1]["block_len_tuple"])
-            if not graphname.startswith("bac000"):
-                blockstart = 0
-                pathoverall = None
-                consensusseq = ""
-                for blockindex,block in enumerate(blocktuple):
-                    parsedblock = block.split("block")[-1].split("-")[0]
-                    if parsedblock in depthfiles:
-                        blockdepths = pd.read_csv(depthfiles[parsedblock],header=None)
-                        blockdepths.index=["all_reads","dedup_reads"]
-                        blockdepths = blockdepths.transpose()
-                        blockdepths = blockdepths.iloc[:-1]
-                        blockdepths["all_reads_per_repitition"] = blockdepths["all_reads"]/blockcounttuple[blockindex]
-                        blockdepths["dedup_reads_per_repitition"] = blockdepths["dedup_reads"]/blockcounttuple[blockindex]
-                        blockdepths["position"] = blockdepths.index.astype(int)
-                        blockdepths["pathposition"] = blockdepths["position"] + blockstart
-                        blockstart = blockdepths["pathposition"].max()+1
-                        blockdepths["blockmissing"] = False
-                        if pathoverall is None:
-                            pathoverall = blockdepths
-                        else:
-                            pathoverall = pd.concat([pathoverall, blockdepths], ignore_index=False)
-
-                    else:
-                        blockdepths = pd.DataFrame(columns=["position","all_reads","all_reads_per_repitition","dedup_reads","dedup_reads_per_repitition","pathposition","blockmissing"])
-                        blockdepths["position"] = range(blocklentuple[blockindex])
-                        blockdepths["pathposition"] = blockdepths["position"] + blockstart
-                        blockstart = blockdepths["pathposition"].max() + 1
-                        blockdepths["all_reads"] = 0
-                        blockdepths["dedup_reads"] = 0
-                        blockdepths["dedup_reads_per_repitition"] = 0
-                        blockdepths["all_reads_per_repitition"] = 0
-                        blockdepths["blockmissing"] = True
-                        if pathoverall is None:
-                            pathoverall = blockdepths
-                        else:
-                            pathoverall = pd.concat([pathoverall, blockdepths], ignore_index=False)
-                    if parsedblock in consensusfiles:
-                        inf = SeqIO.to_dict(SeqIO.parse(consensusfiles[parsedblock], "fasta"))
-                        key = list(inf.keys())[0]
-                        consensusseq += str(inf[key].seq)
-                    else:
-                        consensusseq += "N"*blocklentuple[blockindex]
-
-                pathoverall["pathposition"] = pd.to_numeric(pathoverall["pathposition"], errors="coerce")
-                pathoverall["blockmissing"] = pathoverall["blockmissing"].astype(bool)
-
-                subset = pathoverall[pathoverall["position"] == 0]
-                x_values = subset["pathposition"].unique()
-                n_all = i[1].get("n_reads_all", None)
-                n_all_perrep = i[1].get("n_reads_all_per_repetition", None)
-                n_dedup_perrep = i[1].get("n_reads_dedup_per_repetition", None)
-                n_dedup = i[1].get("n_reads_dedup", None)
-                nc2 = i[1].get("npos_cov_mindepth2", None)
-                pn = i[1].get("prop_npos_cov2", None)
-                pn_str = f"{pn:.3f}" if (pn is not None and pd.notna(pn)) else str(pn)
-                stats_text = (
-                    f"n_reads_all: {n_all}\n"
-                    f"n_all_perrep: {n_all_perrep}\n"
-                    f"n_reads_dedup: {n_dedup}\n"
-                    f"n_dedup_perrep: {n_dedup_perrep}\n"
-                    f"npos_cov_mindepth2: {nc2}\n"
-                    f"prop_npos_cov2: {pn_str}"
-                )
-
-                if float(pn) > 0.7:
-
-                    fig, ax = plt.subplots(figsize=(30, 6))
-                    sns.lineplot(data=pathoverall, x="pathposition", y="dedup_reads", color="red", ax=ax)
-                    sns.lineplot(data=pathoverall, x="pathposition", y="dedup_reads_per_repitition", color="red", ax=ax,alpha=0.3)
-                    sns.lineplot(data=pathoverall, x="pathposition", y="all_reads", color="blue", ax=ax)
-                    sns.lineplot(data=pathoverall, x="pathposition", y="all_reads_per_repitition", color="blue", ax=ax,alpha=0.3)
-
-
-                    plt.title(f"{graphname}:{genera}")
-                    for x in x_values:
-                        plt.axvline(x=x, linestyle="--")
-
-                    # Make room on the right and place the text
-                    fig.subplots_adjust(right=0.75)
-                    ax.text(1.02, 0.95, stats_text, transform=ax.transAxes, ha="left", va="top",
-                            fontsize=10, family="monospace", bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"))
-                    plt.yscale("log")
-
-                    ymin, ymax = ax.get_ylim()
-
-                    ax.fill_between(
-                        pathoverall["pathposition"],
-                        ymin,
-                        ymax,
-                        where=pathoverall["blockmissing"],
-                        alpha=0.7,
-                        color="grey"
-                    )
-
-                    ax.set_ylim(ymin, ymax)
-                    sgraphname = re.sub(r'[^A-Za-z0-9._-]', '_', graphname).replace("_graph","")
-                    sspeciesset = re.sub(r'[^A-Za-z0-9._-]', '_', genera)
-                    filename = f"{plotdir}/{sgraphname}-{sspeciesset}_log.png"
-
-                    plt.savefig(filename,dpi=1000)
-                    plt.close()
-
-                    fig, ax = plt.subplots(figsize=(30, 6))
-                    sns.lineplot(data=pathoverall, x="pathposition", y="dedup_reads", color="red", ax=ax)
-                    sns.lineplot(data=pathoverall, x="pathposition", y="dedup_reads_per_repitition", color="red", ax=ax,
-                                 alpha=0.3)
-                    sns.lineplot(data=pathoverall, x="pathposition", y="all_reads", color="blue", ax=ax)
-                    sns.lineplot(data=pathoverall, x="pathposition", y="all_reads_per_repitition", color="blue", ax=ax,
-                                 alpha=0.3)
-
-                    plt.title(f"{graphname}:{genera}")
-                    for x in x_values:
-                        plt.axvline(x=x, linestyle="--")
-
-                    # Make room on the right and place the text
-                    fig.subplots_adjust(right=0.75)
-                    ax.text(1.02, 0.95, stats_text, transform=ax.transAxes, ha="left", va="top",
-                            fontsize=10, family="monospace", bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"))
-                    # plt.yscale("log")
-
-                    ymin, ymax = ax.get_ylim()
-
-                    ax.fill_between(
-                        pathoverall["pathposition"],
-                        ymin,
-                        ymax,
-                        where=pathoverall["blockmissing"],
-                        alpha=0.7,
-                        color="grey"
-                    )
-
-                    ax.set_ylim(ymin, ymax)
-                    sgraphname = re.sub(r'[^A-Za-z0-9._-]', '_', graphname).replace("_graph", "")
-                    sspeciesset = re.sub(r'[^A-Za-z0-9._-]', '_', genera)
-                    filename = f"{plotdir}/{sgraphname}-{sspeciesset}.png"
-
-                    plt.savefig(filename, dpi=1000)
-                    plt.close()
-
-                    nuccount = sum(consensusseq.count(b) for b in "ATGCatgc")
-                    if nuccount > 0:
-                        graphspecs = re.sub(r'[^A-Za-z0-9._-]', '_', graphname).replace("_graph", "") + "_" + re.sub(
-                            r'[^A-Za-z0-9._-]', '_', genera)
-                        pathconsensus = SeqRecord.SeqRecord(Seq.Seq(consensusseq), id=f"{graphspecs}_{sampleid}_consensus",
-                                                            description="")
-                        SeqIO.write(pathconsensus, f"{consdir}/{graphspecs}_{sampleid}_consensus.fasta", "fasta")
 
 
 if __name__ == "__main__":
