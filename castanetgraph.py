@@ -236,12 +236,14 @@ def merge_nodes(topgraphdata,depthfiles,consensusfiles,plotdir,consdir,sampleid,
         speciesset = i[1]["species_set"]
         speciessetls = speciesset.split(", ")
         if len(speciessetls) > 3:
-            genera = list(set([x.split("~")[0] + f"-{speciesset.count(x.split("~")[0])}" for x in speciessetls]))
+            genera = list(set([
+                x.split("~")[0] + f"-{[y.split('~')[0] for y in speciessetls].count(x.split('~')[0])}"
+                for x in speciessetls
+            ]))
             genera = ", ".join(genera)
             ...
         else:
             genera = speciesset
-        outheader = f"{i[1]["graph_name"].replace("_graph", "")}_{genera}"
         blocktuple = list(map(str, i[1]["block_id_order"]))
         blockcounttuple = list(i[1]["blockcounts"])
         blocklentuple = list(i[1]["block_len_tuple"])
@@ -443,18 +445,12 @@ def merge_rmlst_nodes(rmlstgroups,rmlstgraphres,depthfiles,consensusfiles,outdir
     ...
     #Similar to merge_nodes but for each rmlst locus in a group generate a folder where each locus in that group has consensus and plots
     # then generate a combined plot across all loci also generate a combined fasta file
-    rmlstdir = f"{outdir}/rmlst/"
-    plotdir = f"{rmlstdir}/plots/"
-    consdir = f"{rmlstdir}/consensus/"
-    if not os.path.isdir(rmlstdir):
-        os.makedirs(rmlstdir)
-        os.mkdir(consdir)
-        os.mkdir(plotdir)
-    else:
-        shutil.rmtree(rmlstdir)
-        os.makedirs(rmlstdir)
-        os.mkdir(consdir)
-        os.mkdir(plotdir)
+    plotdir = f"{outdir}_rmlst_plots/"
+    consdir = f"{outdir}_rmlst_consensus/"
+
+    os.mkdir(consdir)
+    os.mkdir(plotdir)
+
 
     for i in rmlstgroups.iterrows():
         indices = i[1]["maindfindex"]
@@ -462,13 +458,13 @@ def merge_rmlst_nodes(rmlstgroups,rmlstgraphres,depthfiles,consensusfiles,outdir
         speciesset = i[1]["species_set"]
         speciessetls = list(speciesset)
         if len(speciessetls) > 3:
-            genera = list(set([x.split("~")[0] + f"-{speciesset.count(x.split("~")[0])}" for x in speciessetls]))
+            genera = list(set([x.split("~")[0] + f"-{speciesset.count(x.split('~')[0])}" for x in speciessetls]))
             genera = "-".join(genera)
             ...
         else:
             genera = speciesset
             genera = "-".join(genera)
-        outheader = f"{i[1]["graph_name"].replace("_graph", "")}_{genera}"
+        outheader = f"{i[1]['graph_name'].replace('_graph', '')}_{genera}"
         # groupdir = f"{rmlstdir}/{outheader}"
         # os.mkdir(groupdir)
         # plotdir = f"{groupdir}/plots/"
@@ -641,13 +637,8 @@ def merge_rmlst_nodes(rmlstgroups,rmlstgraphres,depthfiles,consensusfiles,outdir
             plotrmlst(pathoverall,"rMLST", genera, x_values, locuspos, stats_text, plotdir)
             plotrmlst(pathoverall, "rMLST", genera, x_values, locuspos, stats_text, plotdir,islog=True)
 
-
-
-            #TODO rather than doing plots for each locus, generate one plots across all rMLST loci
-            #TODO also generate one consensus fasta for the sample/rmlst group
-            ...
         SeqIO.write(consensusseqs, f"{consdir}/{sampleid}_{outheader}_consensus.fasta", "fasta")
-    ...
+
 
 
 
@@ -923,7 +914,7 @@ def main():
                 if not i[1].get("block_id", 0).startswith("graphbac000"):
                     graphname = i[1]["probetype"]
                     # sampleid = i[1]["sampleid"]
-                    outheader = f"{i[1]["graph_name"].replace("graph","")}_{i[1]['species_set']}"
+                    outheader = f"{i[1]['graph_name'].replace('graph','')}_{i[1]['species_set']}"
                     if os.path.exists(f"{args.inputdepthfolder}/{graphname}-{sampleid}_depth_by_pos.csv"):
                         n_all = i[1].get("n_reads_all", None)
 
