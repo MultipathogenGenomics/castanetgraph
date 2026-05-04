@@ -441,7 +441,6 @@ def merge_nodes(topgraphdata,depthfiles,consensusfiles,plotdir,consdir,sampleid,
                         r'[^A-Za-z0-9._-]', '_', genera)
                     pathconsensus = SeqRecord.SeqRecord(Seq.Seq(consensusseq), id=f"{graphspecs}_consensus",
                                                         description="")
-                    print("1graphspecs:", graphspecs)
                     SeqIO.write(pathconsensus, f"{consdir}/{graphspecs}_consensus.fasta", "fasta")
 
 
@@ -526,7 +525,6 @@ def merge_rmlst_nodes(rmlstgroups,rmlstgraphres,depthfiles,consensusfiles,plotdi
             blockstart = 0
             mediansize = rmlst_stats[locus]["median"]
             if locus in locus_to_indices:
-                # print(locus,"graph")
                 index = locus_to_indices[locus]
                 grouplocus = rmlstgraphres.iloc[index]
                 graphname = grouplocus["graph_name"]
@@ -583,8 +581,6 @@ def merge_rmlst_nodes(rmlstgroups,rmlstgraphres,depthfiles,consensusfiles,plotdi
                         else:
                             consensusseq += "N" * blocklentuple[blockindex]
                 else:
-                    # print(locus, "nongraph")
-                    #TODO resolve below, need to use single node as full path
                     blockid = grouplocus["block_idonly"]
                     blockdepths = pd.read_csv(depthfiles[blockid], header=None)
                     blockdepths.index = ["all_reads", "dedup_reads"]
@@ -604,7 +600,6 @@ def merge_rmlst_nodes(rmlstgroups,rmlstgraphres,depthfiles,consensusfiles,plotdi
                         pathoverall = pd.concat([pathoverall, blockdepths], ignore_index=False)
 
             else:
-                # print(locus,"missing")
                 blockdepths = pd.DataFrame(
                     columns=["position", "all_reads", "all_reads_per_repitition", "dedup_reads",
                              "dedup_reads_per_repitition", "pathposition", "blockmissing"])
@@ -627,7 +622,6 @@ def merge_rmlst_nodes(rmlstgroups,rmlstgraphres,depthfiles,consensusfiles,plotdi
             if nuccount > 0:
                 graphspecs = re.sub(r'[^A-Za-z0-9._-]', '_', graphname).replace("_graph", "") + "_" + re.sub(
                     r'[^A-Za-z0-9._-]', '_', genera)
-                print("2graphspecs:", graphspecs)
                 pathconsensus = SeqRecord.SeqRecord(Seq.Seq(consensusseq), id=f"{graphspecs}_consensus",
                                                     description="")
                 consensusseqs.append(pathconsensus)
@@ -662,7 +656,6 @@ def merge_rmlst_nodes(rmlstgroups,rmlstgraphres,depthfiles,consensusfiles,plotdi
 
             plotrmlst(pathoverall,"rMLST", genera, x_values, locuspos, stats_text, plotdir)
             plotrmlst(pathoverall, "rMLST", genera, x_values, locuspos, stats_text, plotdir,islog=True)
-        print("3graphspecs:", outheader)
         SeqIO.write(consensusseqs, f"{consdir}/{outheader}_consensus.fasta", "fasta")
 
 
@@ -672,7 +665,7 @@ def merge_rmlst_nodes(rmlstgroups,rmlstgraphres,depthfiles,consensusfiles,plotdi
 def main():
     """
     Main processing pipeline:
-    1. Read input graph dataframe (pickle) and sample Castanet CSV.
+    1. Read input graph dataframe (parquet) and sample Castanet CSV.
     2. Derive a 'block_id' for each probe row by removing the 'rmlst' prefix.
     3. Map per-block coverage/read metrics onto each path (sum over the block set).
     4. Compute proportions and filter paths by read support and coverage proportion.
@@ -682,7 +675,6 @@ def main():
     args = get_args()
 
     # Load inputs provided by the user via CLI
-    # graphdata = pd.read_pickle(, compression="gzip")
     graphdata = pd.read_parquet(args.inputgraphdata)
 
     graphdata["block_id_set"] = graphdata.apply(update_to_longblocksetnames,axis=1)
@@ -707,7 +699,6 @@ def main():
     missing = expected_cols.difference(set(samplecastanet.columns))
     if missing:
         raise ValueError(f"Input castanet file is missing required columns: {missing}")
-    all_block_ids = []
 
 
 
@@ -723,11 +714,8 @@ def main():
     samplecastanet["block_idonly"] = samplecastanet["probetype"].str.split("block").str[-1].str.split("_").str[0].str.split("-").str[0]
     samplecastanet["graph_id"] = samplecastanet["probetype"].str.split("block").str[0].replace("graph", "")
 
-    #TODO when matching blocks from castanet and graphdata need to match graph and block - some blocks have same block_id but are in different graphs
-
     non_graph_hits = samplecastanet[~samplecastanet["block_id"].isin(all_block_ids)].copy()
 
-    #TODO only use node a present if it is over 0.35 covered
     sumcols = ["npos_cov_mindepth2", "n_reads_dedup","n_reads_all",'npos_max_probetype',
        'npos_cov_probetype','npos_cov_mindepth1', 'npos_cov_mindepth2', 'npos_cov_mindepth5',
        'npos_cov_mindepth10', 'npos_cov_mindepth100', 'npos_cov_mindepth1000','npos_dedup_cov_mindepth1', 'npos_dedup_cov_mindepth2',
@@ -755,8 +743,6 @@ def main():
         )
         if col in divbycoount:
             modcol = col+"_per_repetition"
-            #TODO fix below
-
             graphdata[modcol] = graphdata.apply(lambda row: row[col] / sum(row["blockcounts"]) if sum(row["blockcounts"]) > 0 else 0, axis=1)
     for col in sumcolswiththresh:
         if col not in samplecastanet.columns:
@@ -774,7 +760,7 @@ def main():
                     row["blockcounts"]) > 0 else 0,
                 axis=1,
             )
-            # graphdata[modcol] = graphdata.apply(lambda row: row[col] / sum(row["blockcounts"]) if sum(row["blockcounts"]) > 0 else 0, axis=1)
+
 
     meancols = ['amprate_mean','depth_mean','udepth_mean']
     for col in meancols:
@@ -796,7 +782,7 @@ def main():
 
     # Filter out paths with no dedup reads and low coverage proportion
     graphdata = graphdata[graphdata["n_reads_dedup"] > 0]
-    # graphdata = graphdata[graphdata["prop_npos_cov2"] > 0.1]
+
 
     #if no rows remain after filtering, exit
     if graphdata.shape[0]==0:
@@ -834,10 +820,7 @@ def main():
     # From the cleaned set, choose the top path per (component, graph_name) by the same ranking
     finalgraphdata = finalgraphdata.sort_values(by=["npos_cov_mindepth2"], ascending=False).reset_index(
         drop=True)
-    nonrmlstfinal = finalgraphdata[~finalgraphdata['graph_name'].str.startswith('bac000', na=False)]
     # Restore grouping by component and graph_name to select the top (highest-ranked) path
-    #TODO forS87 in 16S wrong path being selected.
-    check = finalgraphdata.groupby(["component", "graph_name"], sort=False).count().reset_index()
     topgraphdata = finalgraphdata.groupby(["component", "graph_name"], sort=False).first().reset_index()
 
     #process rMLST data
@@ -864,12 +847,12 @@ def main():
         carryovercols = ['block_id_order',"block_len_tuple",""'reads_on_target', 'reads_on_target_dedup',]
         rmlstdata = replace_with_collapsed_groups(merged_rmlst,group_metadata,rmlstsumcols,carryovercols,group_dfindex_map,rmlst_stats)
         rmlstdata["graph_name"] = "rmlst_"+rmlstdata["group_id"].str.replace("BACT_","")
-        #group_id species_set n_loci n_unique_loci pathlen	npos_cov_mindepth2	n_reads_dedup	n_reads_all	npos_max_probetype	npos_cov_probetype	npos_cov_mindepth1	npos_cov_mindepth5	npos_cov_mindepth10	npos_cov_mindepth100	npos_cov_mindepth1000	npos_dedup_cov_mindepth1	npos_dedup_cov_mindepth2	npos_dedup_cov_mindepth5	npos_dedup_cov_mindepth10	npos_dedup_cov_mindepth100	npos_dedup_cov_mindepth1000 prop_npos_cov1	prop_npos_cov2	prop_npos_cov5	prop_npos_cov10	prop_npos_cov100	prop_npos_cov1000
+
         colforfinal = ['group_id','species_set','n_loci','n_unique_loci','shared_locus_group','pathlen','npos_cov_mindepth2','n_reads_dedup','n_reads_all','npos_max_probetype','npos_cov_probetype','npos_cov_mindepth1','npos_cov_mindepth5','npos_cov_mindepth10','npos_cov_mindepth100','npos_cov_mindepth1000','npos_dedup_cov_mindepth1','npos_dedup_cov_mindepth2','npos_dedup_cov_mindepth5','npos_dedup_cov_mindepth10','npos_dedup_cov_mindepth100','npos_dedup_cov_mindepth1000', 'prop_npos_cov1', 'prop_npos_cov2', 'prop_npos_cov5', 'prop_npos_cov10', 'prop_npos_cov100', 'prop_npos_cov1000']
         rmlstdatafinal = rmlstdata[colforfinal]
         rmlstdatafinal["species_set"] = rmlstdatafinal["species_set"].apply(lambda x: ", ".join(x))
         rmlstdatafinal.to_csv(f"{args.output}_rMLST_combined.tsv",sep="\t", index=False)
-        # rmlstdata.to_csv(f"{args.output}_rMLST_debug.tsv", sep="\t", index=False)
+
 
 
 
@@ -936,10 +919,8 @@ def main():
 
         for i in non_graph_hits.iterrows():
             if i[1].get("prop_npos_cov2", 0) > 0.1:
-                # print(i[1].get("block_id", 0))
                 if not i[1].get("block_id", 0).startswith("graphbac000"):
                     graphname = i[1]["probetype"]
-                    # sampleid = i[1]["sampleid"]
                     outheader = f"{i[1]['graph_name'].replace('graph','')}_{i[1]['species_set']}"
                     if os.path.exists(f"{args.inputdepthfolder}/{graphname}_depth_by_pos.csv"):
                         n_all = i[1].get("n_reads_all", None)
@@ -973,7 +954,6 @@ def main():
                             filename = f"{plotdir}/{outheader}_non_graph_hit.png"
                             plt.savefig(filename, dpi=1000)
                             plt.close()
-                    print("4graphname:" + graphname)
                     graphcons = f"{args.consensus}/{graphname}/{graphname}_remapped_consensus_sequence.fasta"
                     if os.path.exists(graphcons):
                         s = SeqIO.parse(graphcons,"fasta")
@@ -981,12 +961,9 @@ def main():
                             consensusseq = str(record.seq)
                             nuccount = sum(consensusseq.count(b) for b in "ATGCatgc")
                             if nuccount > 0:
-                                # graphspecs = re.sub(r'[^A-Za-z0-9._-]', '_', str(graphname)).replace("_graph", "") + "_" + re.sub(r'[^A-Za-z0-9._-]', '_', str(sampleid[:30]))
                                 pathconsensus = SeqRecord.SeqRecord(Seq.Seq(consensusseq), id=f"{outheader}_consensus",
                                                                     description="")
-                                print("5outheader",outheader)
                                 SeqIO.write(pathconsensus, f"{consdir}/{outheader}_consensus.fasta", "fasta")
-                        #,f"{consdir}/{graphname}_consensus.fasta")
 
         merge_nodes(topgraphdata, depthfiles, consensusfiles, plotdir, consdir, sampleid)
 
