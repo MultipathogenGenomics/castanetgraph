@@ -14,7 +14,7 @@ python castanetgraph.py \
 ## Required arguments
 
 - `--inputgraphdata`: Parquet file containing graph/path summaries.
-- `--castanetfolder`: Castanet sample output folder containing `*_depth.csv` plus optional depth/consensus subfolders.
+- `--castanetfolder`: Castanet output folder containing `*_depth.csv` plus optional depth/consensus subfolders.
 - `--output`: Output prefix used for all generated files.
 
 ## Expected Castanet folder layout
