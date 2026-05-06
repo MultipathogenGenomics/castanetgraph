@@ -890,7 +890,19 @@ def main():
     'clean_n_reads_all', 'clean_prop_of_reads_on_target', 'pt', 'rawreadnum', 'readprop']
     df_merged = df_merged[cols]
     df_merged["sampleid"] = df_merged["sampleid"].fillna(samplecastanet["sampleid"].iloc[0])
-    df_merged.to_csv(f"{args.output}_all_targets_w_top_paths.tsv", sep="\t", index=False)
+    outcolorder = ['graph_name', 'sampleid','species_set','n_reads_dedup','n_reads_dedup_per_repetition',"n_reads_all","n_reads_all_per_repetition",'npos_cov_mindepth1','npos_cov_mindepth2','npos_cov_mindepth5', 'npos_cov_mindepth10', 'npos_cov_mindepth100', 'npos_cov_mindepth1000',
+    'npos_cov_probetype', 'npos_dedup_cov_mindepth1', 'npos_dedup_cov_mindepth2', 'npos_dedup_cov_mindepth5', 'npos_dedup_cov_mindepth10', 'npos_dedup_cov_mindepth100',
+    'npos_dedup_cov_mindepth1000', 'npos_max_probetype',
+    'prop_ngenes', 'prop_npos_cov1', 'prop_npos_cov2', 'prop_npos_cov5', 'prop_npos_cov10', 'prop_npos_cov100',
+    'prop_npos_cov1000', 'prop_ntargets', 'prop_of_reads_on_target',
+    'reads_on_target', 'reads_on_target_dedup', 'amprate_mean', 'amprate_median', 'amprate_std',
+    'depth_25pc', 'depth_75pc', 'depth_mean', 'depth_median', 'depth_std',
+    'log10_depthmean', 'log10_udepthmean',
+    'n_genes','n_targets', 'nmax_genes', 'nmax_targets',
+    'udepth_25pc', 'udepth_75pc', 'udepth_mean', 'udepth_median', 'udepth_std',
+    'clean_n_reads_all', 'clean_prop_of_reads_on_target', 'pt', 'rawreadnum', 'readprop']
+    out_df_merged = df_merged[outcolorder]
+    out_df_merged.to_csv(f"{args.output}_graph_calls.tsv", sep="\t", index=False)
     plotdir = f"{args.output}_depthplots"
     consdir = f"{args.output}_consensus"
     if not os.path.exists(plotdir):
