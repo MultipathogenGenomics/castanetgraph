@@ -45,7 +45,7 @@ def get_args():
 
     args.inputcastanet = glob.glob(args.castanetfolder + "/*_depth.csv")[0]
     args.inputdepthfolder = args.castanetfolder + "/Depth_output"
-    args.consensus = args.castanetfolder + "/consensus_data"
+    args.consensus = args.castanetfolder + "/consensus_sequences"
 
     return args
 
@@ -912,12 +912,10 @@ def main():
 
     if os.path.exists(args.consensus):
         consensusfiles = {}
-        for i in os.listdir(args.consensus):
-            #get each folder and check that it contains a file ending in _remapped_consensus_sequence.fasta
-            if os.path.isdir(os.path.join(args.consensus, i)):
-                consensusfile = glob.glob(os.path.join(args.consensus, i, "*_remapped_consensus_sequence.fasta"))
-                if len(consensusfile) > 0:
-                    consensusfiles[i] = consensusfile[0]
+        consensusfile = glob.glob(os.path.join(args.consensus, i, "*_remapped_consensus_sequence.fasta"))
+        for i in consensusfile:
+            graphname = i.split("/")[-1].replace("_remapped_consensus_sequence.fasta", "")
+            consensusfiles[graphname] = consensusfile[0]
         consensusfiles = {block.split("block")[-1].split("-")[0]: consensusfiles[block] for block in consensusfiles}
 
     if os.path.exists(args.inputdepthfolder):
@@ -966,7 +964,7 @@ def main():
                             filename = f"{plotdir}/{outheader}_non_graph_hit.png"
                             plt.savefig(filename, dpi=1000)
                             plt.close()
-                    graphcons = f"{args.consensus}/{graphname}/{graphname}_remapped_consensus_sequence.fasta"
+                    graphcons = f"{args.consensus}/{graphname}_remapped_consensus_sequence.fasta"
                     if os.path.exists(graphcons):
                         s = SeqIO.parse(graphcons,"fasta")
                         for record in s:
